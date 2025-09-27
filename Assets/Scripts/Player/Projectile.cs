@@ -1,33 +1,45 @@
 using UnityEngine;
 
+/// <summary>
+/// Proyectil simple configurable: daño, velocidad, vida y pierce/radio.
+/// </summary>
 public class Projectile : MonoBehaviour
 {
-    private int damage;
-    private int direction;
-    public float speed = 8f;
+    public int damage = 4;
+    public float speed = 12f;
+    public float lifetime = 3f;
+    public float radius = 0.15f;
     public LayerMask enemyMask;
+    private int _direction = 1;
 
-    public void Init(int damage, int direction)
+    public void Init(int damage, int direction, float speed = 12f, float lifetime = 1f)
     {
         this.damage = damage;
-        this.direction = direction;
+        this.speed = speed;
+        this.lifetime = lifetime;
+        this._direction = direction;
+        Destroy(gameObject, lifetime);
     }
 
     private void Update()
     {
-        transform.Translate(Vector2.right * direction * speed * Time.deltaTime);
+        transform.Translate(Vector2.right * _direction * speed * Time.deltaTime);
     }
 
     private void OnTriggerEnter2D(Collider2D other)
     {
-        if (other.TryGetComponent(out EnemyBase enemy))
+        if ((enemyMask.value & (1 << other.gameObject.layer)) == 0) return;
+
+        if (other.TryGetComponent(out EnemyBase e))
         {
-            enemy.TakeDamage(damage);
+            e.TakeDamage(damage);
             Destroy(gameObject);
         }
-        else if (other.gameObject.layer == LayerMask.NameToLayer("Ground"))
-        {
-            Destroy(gameObject);
-        }
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(transform.position, radius);
     }
 }

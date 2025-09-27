@@ -1,140 +1,174 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// Controlador de movimiento del Caballero: plataformas, dash, wall-jump, doble salto.
-/// </summary>
-[RequireComponent(typeof(Rigidbody2D), typeof(PlayerAttack))]
 public class PlayerController : MonoBehaviour
 {
-    [Header("Movimiento Basico")]
-    public float moveSpeed = 10f;
-    public float jumpForce = 8f;
+    public float Speed;
+    public float AlturaSalto;
+    public float PotenciaSalto;
+    public float Gravedad;
+    public int Fase1;
+    public int Fase2;
+    public bool Saltando;
+    public float Fallen;
+    public Animator ani;
+    private float YPos;
+    private int sky_;
 
-    [Header("Dash")]
-    public float dashForce = 10f;
-    public float dashCooldown = 1f;
-    public float dashDuration = 0.2f;
+    ///////////////////Detector de piso///////////////////////
 
-    private bool _isDashing = false;
-    private float _dashEndTime;
+    private RaycastHit2D hit;
+    public Vector3 v3;
+    public float distance;
+    public LayerMask layer;
+
+    /////////////////// JumpWall ///////////////////////
+
+    // Start is called before the first frame update
 
 
-    [Header("Salto")]
-    public int maxJumps = 1; // Cambia a 2 tras desbloquear doble salto
-    private int _jumpsRemaining;
-    private bool _canDoubleJump = false;
 
-    [Header("Wall-Jump")]
-    public float wallJumpForce = 12f;
-    public LayerMask wallMask;
-    public float wallCheckDistance = 0.4f;
-
-    [Header("Referencias")]
-    private Rigidbody2D _rb;
-    private PlayerAttack _playerAttack;
-    private bool _isFacingRight = true;
-    private bool _isGrounded = false;
-    private float _lastDashTime = -99f;
-
-    [Header("Ground Check")]
-    public Transform groundCheck;
-    public float groundRadius = .18f;
-    public LayerMask groundMask;
-
-    private void Awake()
+    void Start()
     {
-        _rb = GetComponent<Rigidbody2D>();
-        _playerAttack = GetComponent<PlayerAttack>();
-        _jumpsRemaining = maxJumps;
+        ani = GetComponent<Animator>();
+    }
+    void OnDrawGizmos()
+    {
+        Gizmos.DrawRay(transform.position + v3, Vector3.up * -1 * distance);
+    }
+    public bool CheckCollision
+    {
+        get
+        {
+            hit = Physics2D.Raycast(transform.position + v3, transform.up * -1, distance, layer);
+            return hit.collider != null;
+        }
     }
 
-    private void Update()
+    public void Detector_Plataforma()
     {
-        if (GameManager.Instance.isPaused) return;
-
-        if (_isDashing)
+        if (CheckCollision)///////******
         {
-            if (Time.time >= _dashEndTime)
+            ani.SetBool("Sky", false);
+            sky_ = 0;
+
+            if (!Saltando)
             {
-                _isDashing = false;
+                Gravedad = 0;
+                Fase1 = 0;
+                Fase2 = 0;
             }
-            return;
         }
-
-        float moveInput = InputManager.Instance.GetHorizontalAxis();
-        Move(moveInput);
-
-        if (InputManager.Instance.IsJumpPressed()) TryJump();
-
-        if (InputManager.Instance.IsDashPressed()) TryDash();
-
-        UpdateFacing(moveInput);
-
-        // Grounded check
-        _isGrounded = Physics2D.OverlapCircle(groundCheck.position, groundRadius, groundMask);
-
-        // Reset salto extra
-        if (_isGrounded) _jumpsRemaining = maxJumps;
-    }
-
-    private void Move(float input)
-    {
-        _rb.linearVelocity = new Vector2(input * moveSpeed, _rb.linearVelocity.y);
-    }
-
-    private void UpdateFacing(float input)
-    {
-        if (input > 0 && !_isFacingRight) Flip();
-        else if (input < 0 && _isFacingRight) Flip();
-    }
-
-    private void Flip()
-    {
-        _isFacingRight = !_isFacingRight;
-        Vector3 localScale = transform.localScale;
-        localScale.x *= -1;
-        transform.localScale = localScale;
-    }
-
-    private void TryJump()
-    {
-        // �Wall-jump?
-        RaycastHit2D wallCheck = Physics2D.Raycast(transform.position, Vector2.right * (_isFacingRight ? 1 : -1), wallCheckDistance, wallMask);
-
-        if (wallCheck.collider != null && !_isGrounded)
+        else
         {
-            _rb.linearVelocity = new Vector2(-(_isFacingRight ? 1 : -1) * moveSpeed, wallJumpForce);
-            _jumpsRemaining = maxJumps - 1; // Resetea saltos a uno menos (post wall-jump)
-            return;
+            ani.SetBool("Sky", true);
+            if (!Saltando)
+            {
+                switch (Fase2)
+                {
+                    case 0:
+                        Gravedad = 0;
+                        Fase2 = 1;
+                        break;
+                    case 1:
+                        if (Gravedad > -10)
+                        {
+                            Gravedad -= AlturaSalto / Fallen * Time.deltaTime;
+                        }
+                        break;
+                }
+            }
         }
 
-        // Salto normal/doble
-        if (_isGrounded || _jumpsRemaining > 0)
+        if (transform.position.y > YPos)
         {
-            _rb.linearVelocity = new Vector2(_rb.linearVelocity.x, jumpForce);
-            _jumpsRemaining--;
+            ani.SetFloat("Gravedad", 1);
+        }
+        if (transform.position.y < YPos)
+        {
+            ani.SetFloat("Gravedad", 0);
+
+            switch (sky_)
+            {
+                case 0:
+                    ani.Play("Base Layer.Sky", 0, 0);
+                    sky_++;
+                    break;
+            }
+        }
+
+        YPos = transform.position.y;
+    }
+    public void Jump()
+    {
+        if (Input.GetKey(KeyCode.O))
+        {
+            switch (Fase1)
+            {
+                case 0:
+
+                    if (CheckCollision)
+                    {
+                        Gravedad = AlturaSalto;
+                        Fase1 = 1;
+                        Saltando = true;
+                    }
+
+                    break;
+                case 1:
+
+                    if (Gravedad > 0)
+                    {
+                        Gravedad -= PotenciaSalto * Time.deltaTime;
+                    }
+                    else
+                    {
+                        Fase1 = 2;
+                    }
+                    Saltando = true;
+
+                    break;
+                case 2:
+                    Saltando = false;
+                    break;
+            }
+        }
+        else
+        {
+            Saltando = false;
+        }
+    }
+    public void Move()
+    {
+        if (Input.GetKey(KeyCode.D))
+        {
+            transform.Translate(Vector3.right * Speed * Time.deltaTime);
+            transform.rotation = Quaternion.Euler(0, 0, 0);
+            ani.SetBool("Run", true);
+        }
+        else
+        {
+            ani.SetBool("Run", false);
+        }
+
+        if (Input.GetKey(KeyCode.A))
+        {
+            transform.Translate(Vector3.right * Speed * Time.deltaTime);
+            transform.rotation = Quaternion.Euler(0, 180, 0);
+            ani.SetBool("Run", true);
         }
     }
 
-    private void TryDash()
+    // Update is called once per frame
+    void FixedUpdate()
     {
-        if (Time.time < _lastDashTime + dashCooldown) return;
-
-        _isDashing = true;
-        _lastDashTime = Time.time;
-        _dashEndTime = Time.time + dashDuration;
-
-        // Aplica velocidad fuerte en dirección actual
-        _rb.linearVelocity = new Vector2((_isFacingRight ? 1 : -1) * dashForce, 0f);
+        Move();
+        Jump();
     }
-
-
-    /// <summary>
-    /// Activa el doble salto tras evento de glitch/memoria
-    /// </summary>
-    public void UnlockDoubleJump()
+    void Update()
     {
-        maxJumps = 2;
-        _canDoubleJump = true;
+        Detector_Plataforma();
+        transform.Translate(Vector3.up * Gravedad * Time.deltaTime);
     }
 }
