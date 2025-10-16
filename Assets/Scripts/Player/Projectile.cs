@@ -1,45 +1,42 @@
 using UnityEngine;
 
-/// <summary>
-/// Proyectil simple configurable: daño, velocidad, vida y pierce/radio.
-/// </summary>
 public class Projectile : MonoBehaviour
 {
-    public int damage = 4;
-    public float speed = 12f;
-    public float lifetime = 3f;
-    public float radius = 0.15f;
-    public LayerMask enemyMask;
-    private int _direction = 1;
+    public float speed = 14f;
+    public int damage = 1;
+    public float lifetime = 2f;
+    public LayerMask hitLayers;
 
-    public void Init(int damage, int direction, float speed = 12f, float lifetime = 1f)
+    private Vector2 direction = Vector2.right;
+
+    void Start()
     {
-        this.damage = damage;
-        this.speed = speed;
-        this.lifetime = lifetime;
-        this._direction = direction;
         Destroy(gameObject, lifetime);
     }
 
-    private void Update()
+    public void SetDirection(Vector2 dir)
     {
-        transform.Translate(Vector2.right * _direction * speed * Time.deltaTime);
+        if (dir == Vector2.zero) dir = Vector2.right;
+        direction = dir.normalized;
+
+        // orientación visual (opcional)
+        if (Mathf.Abs(direction.x) > 0.01f)
+            transform.localScale = new Vector3(Mathf.Sign(direction.x) * Mathf.Abs(transform.localScale.x), transform.localScale.y, transform.localScale.z);
     }
 
-    private void OnTriggerEnter2D(Collider2D other)
+    void Update()
     {
-        if ((enemyMask.value & (1 << other.gameObject.layer)) == 0) return;
-
-        if (other.TryGetComponent(out EnemyBase e))
-        {
-            e.TakeDamage(damage);
-            Destroy(gameObject);
-        }
+        // Movimiento recto, sin gravedad
+        transform.position += (Vector3)(direction * speed * Time.deltaTime);
     }
 
-    private void OnDrawGizmosSelected()
+    void OnTriggerEnter2D(Collider2D col)
     {
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(transform.position, radius);
+        if (((1 << col.gameObject.layer) & hitLayers) == 0) return;
+
+        Enemy e = col.GetComponent<Enemy>();
+        if (e != null) e.TakeDamage(damage);
+
+        Destroy(gameObject);
     }
 }

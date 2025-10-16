@@ -1,174 +1,481 @@
+using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
 
 public class PlayerController : MonoBehaviour
 {
-    public float Speed;
-    public float AlturaSalto;
-    public float PotenciaSalto;
-    public float Gravedad;
-    public int Fase1;
-    public int Fase2;
-    public bool Saltando;
-    public float Fallen;
-    public Animator ani;
-    private float YPos;
-    private int sky_;
+    [Header("Movement")]
+    public float moveSpeed = 8f;
 
-    ///////////////////Detector de piso///////////////////////
+    [Header("Jump")]
+    public float jumpForce = 14f;                 // impulso inicial
+    public float maxJumpHoldTime = 0.18f;         // cuánto tiempo máximo puede sostener el botón para 'boost'
+    public float jumpHoldForce = 35f;             // fuerza adicional aplicada mientras se mantiene
+    public float variableJumpMultiplier = 0.5f;   // si sueltas antes, multiplica Y para cortar salto
 
-    private RaycastHit2D hit;
-    public Vector3 v3;
-    public float distance;
-    public LayerMask layer;
+    [Header("Dash")]
+    public float dashSpeed = 18f;
+    public float dashDuration = 0.18f;
+    public float dashEndDecel = 0.08f;            // tiempo para desacelerar al terminar dash
+    public float dashCooldown = 0.25f;
+    float dashCooldownTimer = 0f;
 
-    /////////////////// JumpWall ///////////////////////
+    [Header("Wall")]
+    public float wallSlideSpeed = 1.5f;
+    public float wallJumpForce = 14f;
 
-    // Start is called before the first frame update
+    [Header("Wall Jump Settings")]
+    public float wallJumpHorizontal = 10f;  // fuerza horizontal aplicada al wall jump
+    public float wallJumpVertical = 14f;    // fuerza vertical aplicada
+    public float wallJumpBufferTime = 0.12f; // tiempo para permitir wall jump después de soltar la pared
+    public float coyoteTime = 0.08f;        // ventana tras despegar del suelo para permitir jump
 
+    // internos
+    private float lastLeftWallTime = -10f;
+    private float lastRightWallTime = -10f;
+    private float lastGroundedTime = -10f;
 
+    [Header("Checks")]
+    public Transform groundCheck;
+    public Transform wallCheck;
+    public LayerMask groundLayer;
+    public float checkRadius = 0.18f;
 
-    void Start()
+    [Header("Buster (K)")]
+    public GameObject projectilePrefab;
+    public Transform firePoint;
+    public float shootCooldown = 0.25f;
+    private float lastShootTime;
+
+    [Header("Sword / Combo (O)")]
+    public Transform attackPoint;
+    public float attackRadius = 0.4f;
+    public LayerMask enemyLayer;
+    public float comboResetTime = 0.9f;
+    private int comboStep = 0;
+
+    [Header("Attack cancel options")]
+    public bool allowAttackCancelByJump = true;
+    public bool allowAttackCancelByDash = true;
+    public bool allowAttackCancelByShoot = false;
+
+    // internals
+    Rigidbody2D rb;
+    Animator anim;
+    bool isGrounded;
+    bool isWallSliding;
+    bool isDashing;
+    bool facingRight = true;
+
+    // jump hold
+    bool isJumping = false;
+    float jumpHoldTimer = 0f;
+
+    // combo flags
+    bool isAttacking = false;
+    bool comboQueued = false;
+    float lastComboTime = 0f;
+
+    // hit tracking
+    HashSet<int> hitThisAttack = new HashSet<int>();
+
+    void Awake()
     {
-        ani = GetComponent<Animator>();
+        rb = GetComponent<Rigidbody2D>();
+        anim = GetComponent<Animator>();
     }
-    void OnDrawGizmos()
+
+    void Update()
     {
-        Gizmos.DrawRay(transform.position + v3, Vector3.up * -1 * distance);
-    }
-    public bool CheckCollision
-    {
-        get
+        // timers
+        if (dashCooldownTimer > 0f) dashCooldownTimer -= Time.deltaTime;
+
+        CheckSurroundings();
+        HandleInput();
+        UpdateAnimatorParams();
+
+        // Jump hold handling: apply extra upward force while holding and under max time
+        if (isJumping && Input.GetKey(KeyCode.L))
         {
-            hit = Physics2D.Raycast(transform.position + v3, transform.up * -1, distance, layer);
-            return hit.collider != null;
-        }
-    }
-
-    public void Detector_Plataforma()
-    {
-        if (CheckCollision)///////******
-        {
-            ani.SetBool("Sky", false);
-            sky_ = 0;
-
-            if (!Saltando)
+            jumpHoldTimer += Time.deltaTime;
+            if (jumpHoldTimer <= maxJumpHoldTime)
             {
-                Gravedad = 0;
-                Fase1 = 0;
-                Fase2 = 0;
+                // apply small continuous upward force so holding increases height
+                rb.AddForce(Vector2.up * jumpHoldForce * Time.deltaTime, ForceMode2D.Force);
             }
         }
-        else
+
+        // Reset combo if too much time passes
+        if (!isAttacking && Time.time - lastComboTime > comboResetTime)
+            comboStep = 0;
+    }
+
+    void CheckSurroundings()
+    {
+        // Ground check (mantén tu lógica)
+        isGrounded = (groundCheck != null) && Physics2D.OverlapCircle(groundCheck.position, checkRadius, groundLayer);
+        if (isGrounded) lastGroundedTime = Time.time;
+
+        // Wall detection: boxcast a izquierda/derecha usando wallCheck como referencia
+        // Ajusta size según tu sprite (height ~ 0.9f)
+        Vector2 boxSize = new Vector2(0.1f, 0.9f);
+        float castDist = 0.05f;
+
+        bool leftHit = Physics2D.BoxCast(wallCheck.position, boxSize, 0f, Vector2.left, castDist, groundLayer);
+        bool rightHit = Physics2D.BoxCast(wallCheck.position, boxSize, 0f, Vector2.right, castDist, groundLayer);
+
+        // wall sliding si estamos en contacto con pared, no en suelo y cayendo
+        isWallSliding = (leftHit || rightHit) && !isGrounded && rb.linearVelocity.y < 0.1f;
+
+        // guarda último contacto para wall jump buffer
+        if (leftHit) lastLeftWallTime = Time.time;
+        if (rightHit) lastRightWallTime = Time.time;
+
+        // opcional debug
+        // Debug.Log($"leftHit:{leftHit} rightHit:{rightHit} isWallSliding:{isWallSliding} velY:{rb.velocity.y}");
+    }
+
+    void HandleInput()
+    {
+        float move = 0f;
+        if (Input.GetKey(KeyCode.A)) move = -1f;
+        if (Input.GetKey(KeyCode.D)) move = 1f;
+
+        if (isWallSliding)
         {
-            ani.SetBool("Sky", true);
-            if (!Saltando)
+            // si facingRight == true, la pared está a la derecha; si move > 0 (presionando derecha) entonces bloquea
+            if ((facingRight && move > 0f) || (!facingRight && move < 0f))
             {
-                switch (Fase2)
+                move = 0f; // evita empujar contra la pared
+            }
+        }
+
+        // Horizontal movement (permitir movimiento si no dashing; opcional bloquear mientras atacas)
+        if (!isDashing && !isAttacking)
+            rb.linearVelocity = new Vector2(move * moveSpeed, rb.linearVelocity.y);
+
+        // Flip
+        if (move > 0 && !facingRight) Flip();
+        else if (move < 0 && facingRight) Flip();
+
+        // JUMP (L)
+        if (Input.GetKeyDown(KeyCode.L))
+        {
+            // If attacking and cancel allowed, cancel and jump
+            if (isAttacking && allowAttackCancelByJump)
+            {
+                isAttacking = false;
+                comboQueued = false;
+                // reset any attack triggers if necessary
+                // anim.ResetTrigger($"Attack{comboStep}");
+                StartJump();
+            }
+            else
+            {
+                if (isGrounded)
+                    StartJump();
+                else if (isWallSliding)
+                    WallJump();
+                else if (isDashing && allowAttackCancelByJump)
                 {
-                    case 0:
-                        Gravedad = 0;
-                        Fase2 = 1;
-                        break;
-                    case 1:
-                        if (Gravedad > -10)
-                        {
-                            Gravedad -= AlturaSalto / Fallen * Time.deltaTime;
-                        }
-                        break;
+                    // cancel dash and jump
+                    StopAllCoroutines(); // stop dash coroutine safely (we will rely on flags)
+                    isDashing = false;
+                    if (anim != null) anim.SetBool("Dashing", false);
+                    StartJump();
                 }
             }
         }
 
-        if (transform.position.y > YPos)
+        // Jump release: short jump
+        if (Input.GetKeyUp(KeyCode.L))
         {
-            ani.SetFloat("Gravedad", 1);
+            // stop jump hold
+            isJumping = false;
+            jumpHoldTimer = 0f;
+            // apply short-cut if still going up (optional)
+            if (rb.linearVelocity.y > 0f)
+                rb.linearVelocity = new Vector2(rb.linearVelocity.x, rb.linearVelocity.y * variableJumpMultiplier);
         }
-        if (transform.position.y < YPos)
-        {
-            ani.SetFloat("Gravedad", 0);
 
-            switch (sky_)
+        // Dash (Ñ) - try several possible KeyCodes: semicolon, right bracket, backslash
+        if ((Input.GetKeyDown(KeyCode.Semicolon) || Input.GetKeyDown(KeyCode.RightBracket) || Input.GetKeyDown(KeyCode.Backslash)) && dashCooldownTimer <= 0f)
+        {
+            if (isAttacking && allowAttackCancelByDash)
             {
-                case 0:
-                    ani.Play("Base Layer.Sky", 0, 0);
-                    sky_++;
-                    break;
+                isAttacking = false;
+                comboQueued = false;
+                StartCoroutine(DoDash());
+            }
+            else
+            {
+                StartCoroutine(DoDash());
             }
         }
 
-        YPos = transform.position.y;
-    }
-    public void Jump()
-    {
-        if (Input.GetKey(KeyCode.O))
+        // Shooting (K)
+        if (Input.GetKeyDown(KeyCode.K))
         {
-            switch (Fase1)
+            if (isAttacking && allowAttackCancelByShoot)
             {
-                case 0:
+                isAttacking = false;
+                comboQueued = false;
+            }
+            HandleShooting();
+        }
 
-                    if (CheckCollision)
-                    {
-                        Gravedad = AlturaSalto;
-                        Fase1 = 1;
-                        Saltando = true;
-                    }
+        // Sword (O)
+        if (Input.GetKeyDown(KeyCode.O))
+        {
+            OnSwordButtonPressed();
+        }
+        else if (Input.GetKeyUp(KeyCode.O))
+        {
+            comboQueued = false;
+        }
 
-                    break;
-                case 1:
+        // set animator speed (also set other animator params in UpdateAnimatorParams)
+        if (anim != null)
+            anim.SetFloat("Speed", Mathf.Abs(rb.linearVelocity.x));
 
-                    if (Gravedad > 0)
-                    {
-                        Gravedad -= PotenciaSalto * Time.deltaTime;
-                    }
-                    else
-                    {
-                        Fase1 = 2;
-                    }
-                    Saltando = true;
+        // update grounded/wall/VSpeed in anim too
+        if (anim != null)
+        {
+            anim.SetBool("Grounded", isGrounded);
+            anim.SetBool("WallSliding", isWallSliding);
+            anim.SetFloat("VSpeed", rb.linearVelocity.y);
+        }
+    }
 
-                    break;
-                case 2:
-                    Saltando = false;
-                    break;
+    // Start jump helper: separate to allow dash-cancel->jump / attack-cancel->jump
+    void StartJump()
+    {
+        // Reset vertical for consistent impulse, then add impulse
+        rb.linearVelocity = new Vector2(rb.linearVelocity.x, 0f);
+        rb.AddForce(Vector2.up * jumpForce, ForceMode2D.Impulse);
+        isJumping = true;
+        jumpHoldTimer = 0f;
+        if (anim != null) anim.SetTrigger("Jump");
+    }
+
+    void WallJump()
+    {
+        // permite wall jump si actualmente en wall slide o si tocaste pared recientemente (buffer)
+        bool canWallJump = isWallSliding ||
+            (Time.time - lastLeftWallTime <= wallJumpBufferTime) ||
+            (Time.time - lastRightWallTime <= wallJumpBufferTime);
+
+        if (!canWallJump) return;
+
+        // decidir de qué lado saltar: si lastLeftWallTime reciente -> empujar a la derecha (dir=1)
+        float dir = 0f;
+        if (Time.time - lastLeftWallTime <= wallJumpBufferTime) dir = 1f;
+        else if (Time.time - lastRightWallTime <= wallJumpBufferTime) dir = -1f;
+        else dir = facingRight ? -1f : 1f;
+
+        // aplicar impulso: primero resetear velocidad vertical/horizontal para consistencia
+        rb.linearVelocity = new Vector2(0f, 0f);
+        rb.AddForce(new Vector2(dir * wallJumpHorizontal, wallJumpVertical), ForceMode2D.Impulse);
+
+        // mirar hacia fuera de la pared
+        if (dir > 0 && !facingRight) Flip();
+        else if (dir < 0 && facingRight) Flip();
+
+        // desactivar wallSlide y permitir breve invulnerabilidad de re-attach si quieres (opcional)
+        isWallSliding = false;
+
+        if (anim != null) anim.SetTrigger("Jump");
+    }
+
+    IEnumerator DoDash()
+    {
+        if (isDashing) yield break;
+        isDashing = true;
+        if (anim != null) anim.SetBool("Dashing", true);
+
+        float dir = facingRight ? 1f : -1f;
+        float elapsed = 0f;
+        float startVx = rb.linearVelocity.x;
+
+        // dash main phase: maintain horizontal dash speed, preserve vertical
+        while (elapsed < dashDuration)
+        {
+            rb.linearVelocity = new Vector2(dir * dashSpeed, rb.linearVelocity.y);
+            elapsed += Time.deltaTime;
+
+            // allow cancel into jump mid-dash
+            if (Input.GetKeyDown(KeyCode.L) && allowAttackCancelByJump)
+            {
+                // cancel dash and start jump
+                isDashing = false;
+                if (anim != null) anim.SetBool("Dashing", false);
+                StartJump();
+                dashCooldownTimer = dashCooldown; // start cooldown
+                yield break;
+            }
+
+            yield return null;
+        }
+
+        // end dash: decelerate smoothly for dashEndDecel seconds (so it doesn't snap)
+        float decel = dashEndDecel;
+        float t = 0f;
+        float fromVx = rb.linearVelocity.x;
+        while (t < decel)
+        {
+            float vx = Mathf.Lerp(fromVx, 0f, t / decel);
+            rb.linearVelocity = new Vector2(vx, rb.linearVelocity.y);
+            t += Time.deltaTime;
+            yield return null;
+        }
+
+        // ensure not left as isDashing
+        isDashing = false;
+        if (anim != null) anim.SetBool("Dashing", false);
+
+        // start cooldown
+        dashCooldownTimer = dashCooldown;
+    }
+
+    void HandleShooting()
+    {
+        if (Time.time - lastShootTime < shootCooldown) return;
+
+        if (projectilePrefab == null || firePoint == null)
+        {
+            Debug.LogError("PlayerController: projectilePrefab o firePoint no asignado.");
+            return;
+        }
+
+        lastShootTime = Time.time;
+        if (anim != null) anim.SetTrigger("Shoot");
+
+        GameObject p = Instantiate(projectilePrefab, firePoint.position, Quaternion.identity);
+
+        Projectile projScript = p.GetComponent<Projectile>();
+        if (projScript != null)
+        {
+            projScript.SetDirection(facingRight ? Vector2.right : Vector2.left);
+        }
+        else
+        {
+            Rigidbody2D prb = p.GetComponent<Rigidbody2D>();
+            if (prb != null)
+            {
+                prb.gravityScale = 0f;
+                prb.linearVelocity = (facingRight ? Vector2.right : Vector2.left) * 12f;
+            }
+            else
+                Debug.LogWarning("El proyectil instanciado no tiene ni Projectile ni Rigidbody2D.");
+        }
+    }
+
+    // --------------------
+    // COMBO SABER (O)
+    // --------------------
+    void OnSwordButtonPressed()
+    {
+        if (isAttacking)
+        {
+            comboQueued = true;
+            return;
+        }
+
+        comboStep++;
+        if (comboStep > 4) comboStep = 1;
+
+        isAttacking = true;
+        comboQueued = false;
+        lastComboTime = Time.time;
+
+        if (anim != null) anim.SetTrigger($"Attack{comboStep}");
+    }
+
+    // Animation Event -> se llama al final de cada Saber clip
+    public void Finish_Ani()
+    {
+        isAttacking = false;
+
+        if (comboQueued)
+        {
+            comboQueued = false;
+            comboStep++;
+            if (comboStep > 4) comboStep = 1;
+            isAttacking = true;
+            lastComboTime = Time.time;
+            if (anim != null) anim.SetTrigger($"Attack{comboStep}");
+        }
+        else
+        {
+            comboStep = 0;
+            hitThisAttack.Clear();
+        }
+    }
+
+    // Animation Event -> frame de hit
+    public void PerformMeleeHit(int step)
+    {
+        if (attackPoint == null)
+        {
+            Debug.LogWarning("PerformMeleeHit llamado pero attackPoint no asignado.");
+            return;
+        }
+
+        Collider2D[] hits = Physics2D.OverlapCircleAll(attackPoint.position, attackRadius, enemyLayer);
+        foreach (var c in hits)
+        {
+            int id = c.gameObject.GetInstanceID();
+            if (hitThisAttack.Contains(id)) continue;
+            hitThisAttack.Add(id);
+
+            Enemy e = c.GetComponent<Enemy>();
+            if (e != null)
+            {
+                int dmg = 1;
+                e.TakeDamage(dmg);
+
+                // optional knockback
+                Rigidbody2D erb = e.GetComponent<Rigidbody2D>();
+                if (erb != null)
+                {
+                    Vector2 kbDir = (c.transform.position - transform.position).normalized;
+                    erb.AddForce(kbDir * 200f);
+                }
             }
         }
-        else
-        {
-            Saltando = false;
-        }
-    }
-    public void Move()
-    {
-        if (Input.GetKey(KeyCode.D))
-        {
-            transform.Translate(Vector3.right * Speed * Time.deltaTime);
-            transform.rotation = Quaternion.Euler(0, 0, 0);
-            ani.SetBool("Run", true);
-        }
-        else
-        {
-            ani.SetBool("Run", false);
-        }
-
-        if (Input.GetKey(KeyCode.A))
-        {
-            transform.Translate(Vector3.right * Speed * Time.deltaTime);
-            transform.rotation = Quaternion.Euler(0, 180, 0);
-            ani.SetBool("Run", true);
-        }
     }
 
-    // Update is called once per frame
-    void FixedUpdate()
+    void UpdateAnimatorParams()
     {
-        Move();
-        Jump();
+        if (anim == null) return;
+        anim.SetFloat("Speed", Mathf.Abs(rb.linearVelocity.x));
+        anim.SetBool("Grounded", isGrounded);
+        anim.SetBool("WallSliding", isWallSliding);
+        anim.SetFloat("VSpeed", rb.linearVelocity.y);
     }
-    void Update()
+
+    void Flip()
     {
-        Detector_Plataforma();
-        transform.Translate(Vector3.up * Gravedad * Time.deltaTime);
+        facingRight = !facingRight;
+        Vector3 s = transform.localScale;
+        s.x *= -1f;
+        transform.localScale = s;
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        if (groundCheck != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(groundCheck.position, checkRadius);
+        }
+        if (wallCheck != null)
+        {
+            Gizmos.color = Color.cyan;
+            // box cast visualization
+            Vector2 size = new Vector2(0.1f, 0.9f);
+            Gizmos.DrawWireCube(wallCheck.position + Vector3.right * 0.05f, size); // right check
+            Gizmos.DrawWireCube(wallCheck.position + Vector3.left * 0.05f, size); // left check
+        }
     }
 }
